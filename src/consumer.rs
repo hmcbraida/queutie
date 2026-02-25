@@ -57,6 +57,9 @@ impl BasicMessageConsumer {
     pub fn consume_one_message(&self) -> Option<Vec<u8>> {
         let _lock = self.acquire_lock();
 
+        println!("acquired lock");
+        thread::sleep(time::Duration::from_secs(10));
+
         let message_id = self.pop_registry();
         message_id.map(|message_id| {
             let mut message_path = self.queue_directory.clone();
