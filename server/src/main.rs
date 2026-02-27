@@ -22,7 +22,8 @@ fn main() {
         TcpListener::bind((configuration.hostname.as_str(), configuration.port)).unwrap();
 
     for mut stream in listener.incoming().map(|x| x.unwrap()) {
-        let msg = network::read_message(&mut stream);
-        println!("{:?}", msg);
+        let packet = network::read_packet(&mut stream);
+        println!("{:?}", packet);
+        println!("{}", str::from_utf8(&packet.body).unwrap())
     }
 }
