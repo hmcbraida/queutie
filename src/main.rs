@@ -1,15 +1,18 @@
-mod consumer;
-mod filesystem;
-mod producer;
+use crate::queue::{Message, MessageQueue};
+
+mod queue;
 
 fn main() {
-    let message_producer = producer::BasicMessageProducer::new("runtime/", "test_queue");
-    let message_consumer = consumer::BasicMessageConsumer::new("runtime/", "test_queue");
+    let mut queue = MessageQueue::new();
 
-    message_producer.push_to_queue("hello world");
+    queue.push_message(Message::new(vec![1, 2]));
+    queue.push_message(Message::from_string(String::from("hello world")));
 
-    let msg_bytes = message_consumer.consume_one_message().unwrap();
-    let msg = str::from_utf8(&msg_bytes).unwrap();
-
-    println!("{}", &msg);
+    if let Some(msg) = queue.pop_message() {
+        println!("{:?}", msg);
+    }
+    if let Some(msg) = queue.pop_message() {
+        let msg_contents = msg.to_string().unwrap();
+        println!("{}", msg_contents);
+    }
 }

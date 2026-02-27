@@ -5,3 +5,15 @@ edition = "2024"
 
 [dependencies]
 uuid = { version = "1.21.0", features = ["v4"] }
+
+[dev-dependencies]
+clippy = "0.0.302"
+
+[[bin]]
+name = "server"
+
+[[bin]]
+name = "producer"
+
+[[bin]]
+name = "consumer"
