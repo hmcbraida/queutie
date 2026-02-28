@@ -24,6 +24,6 @@ fn main() {
     for mut stream in listener.incoming().map(|x| x.unwrap()) {
         let packet = network::read_packet(&mut stream);
         println!("{:?}", packet);
-        println!("{}", str::from_utf8(&packet.body).unwrap())
+        // println!("{}", str::from_utf8(&packet.body).unwrap())
     }
 }

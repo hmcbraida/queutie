@@ -8,6 +8,9 @@ const FRAME_BODY_LENGTH: usize = 1024;
 
 #[derive(Debug)]
 struct PacketFrame {
+    // TODO: The header should be destructured in this struct, and the write /
+    // read frame operation should do the dirty work of deserialising. Right
+    // now it is done in read_frame and write_frame
     pub header: [u8; FRAME_HEADER_LENGTH],
     pub body: [u8; FRAME_BODY_LENGTH],
 }
@@ -37,18 +40,34 @@ fn write_frame(buf_writer: &mut BufWriter<&mut TcpStream>, frame: &PacketFrame) 
 }
 
 #[derive(Debug)]
+pub enum PacketType {
+    Publish,
+    Subscribe,
+}
+
+#[derive(Debug)]
+pub struct PacketHeader {
+    pub packet_type: PacketType,
+    pub packet_target: String,
+}
+
+const PACKET_HEADER_SIZE: usize = 32;
+const PACKET_TARGET_SIZE: usize = 16;
+
+#[derive(Debug)]
 pub struct Packet {
+    pub header: PacketHeader,
     pub body: Vec<u8>,
 }
 
 impl Packet {
-    pub fn new(body: Vec<u8>) -> Self {
-        return Packet { body };
+    pub fn new(header: PacketHeader, body: Vec<u8>) -> Self {
+        return Packet { header, body };
     }
 }
 
 pub fn read_packet(stream: &mut TcpStream) -> Packet {
-    let mut packet_body: Vec<u8> = Vec::new();
+    let mut packet_data: Vec<u8> = Vec::new();
 
     let mut buf_reader = BufReader::new(stream);
 
@@ -59,18 +78,48 @@ pub fn read_packet(stream: &mut TcpStream) -> Packet {
         let frame_body_length =
             u16::from_be_bytes(frame.header[1..=2].try_into().unwrap()) as usize;
 
-        packet_body.extend_from_slice(&frame.body[..frame_body_length]);
+        packet_data.extend_from_slice(&frame.body[..frame_body_length]);
 
         if frame_is_final {
             break;
         }
     }
 
-    Packet { body: packet_body }
+    let body = packet_data.split_off(PACKET_HEADER_SIZE);
+    let packet_type = match packet_data[0] {
+        0 => PacketType::Publish,
+        1 => PacketType::Subscribe,
+        _ => panic!("unknown package type"),
+    };
+    let packet_target = String::from(str::from_utf8(&packet_data[1..PACKET_TARGET_SIZE]).unwrap());
+    let header = PacketHeader {
+        packet_target,
+        packet_type,
+    };
+
+    Packet { header, body }
 }
 
-pub fn write_packet(stream: &mut TcpStream, packet: &Packet) {
-    let mut bytes_remaining = packet.body.len();
+pub fn write_packet(stream: &mut TcpStream, packet: Packet) {
+    let Packet { header, mut body } = packet;
+
+    let mut packet_data = Vec::from([0u8; PACKET_HEADER_SIZE]);
+    let PacketHeader {
+        packet_type,
+        packet_target,
+    } = header;
+    packet_data[0] = match packet_type {
+        PacketType::Publish => 0,
+        PacketType::Subscribe => 1,
+    };
+    let packet_target_bytes = packet_target.as_bytes();
+    if packet_target_bytes.len() > PACKET_TARGET_SIZE {
+        panic!("Packet target too big!")
+    }
+    packet_data[1..1 + packet_target_bytes.len()].copy_from_slice(packet_target_bytes);
+    packet_data.append(&mut body);
+
+    let mut bytes_remaining = packet_data.len();
     let mut read_offset: usize = 0;
 
     let mut buf_writer = BufWriter::new(stream);
@@ -94,7 +143,7 @@ pub fn write_packet(stream: &mut TcpStream, packet: &Packet) {
 
         // Next we construct the frame body by copying from the remaining packet.
         let mut frame_body = [0u8; FRAME_BODY_LENGTH];
-        frame_body[..bytes_to_write].copy_from_slice(&packet.body[read_offset..]);
+        frame_body[..bytes_to_write].copy_from_slice(&packet_data[read_offset..]);
         read_offset += bytes_to_write;
 
         let frame = PacketFrame {
