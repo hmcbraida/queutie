@@ -53,27 +53,18 @@ impl Server {
                 let message = Message::new(packet.body);
                 let queue = Self::get_or_create_queue(&state, &queue_name);
 
-                let subscribers = {
+                let mut subscribers = {
                     let mut queue = queue.lock().unwrap();
                     queue.push_message(message.clone());
-                    queue.subscribers()
+                    // Move subscribers out so network sends happen without holding
+                    // the queue lock; surviving subscribers are restored afterward.
+                    queue.take_subscribers()
                 };
 
-                let failed_subscribers = subscribers
-                    .into_iter()
-                    .filter_map(|mut sub| {
-                        if sub.send(message.contents()) {
-                            None
-                        } else {
-                            Some(sub)
-                        }
-                    })
-                    .collect::<Vec<_>>();
+                subscribers.retain_mut(|sub| sub.send(message.contents()));
 
-                if !failed_subscribers.is_empty() {
-                    let mut queue = queue.lock().unwrap();
-                    queue.remove_subscribers(&failed_subscribers);
-                }
+                let mut queue = queue.lock().unwrap();
+                queue.restore_subscribers(subscribers);
 
                 println!("Published message to queue");
             }
