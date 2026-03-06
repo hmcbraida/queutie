@@ -5,7 +5,8 @@ use std::thread;
 
 use crate::queue::{Message, MessageQueue, Subscriber, TcpSubscriber};
 
-pub type SharedState = Arc<Mutex<HashMap<String, MessageQueue<TcpSubscriber>>>>;
+type SharedQueue = Arc<Mutex<MessageQueue<TcpSubscriber>>>;
+pub type SharedState = Arc<Mutex<HashMap<String, SharedQueue>>>;
 
 pub struct Server {
     state: SharedState,
@@ -50,12 +51,10 @@ impl Server {
         match packet.header.packet_type {
             PacketType::Publish => {
                 let message = Message::new(packet.body);
+                let queue = Self::get_or_create_queue(&state, &queue_name);
 
                 let subscribers = {
-                    let mut state = state.lock().unwrap();
-                    let queue = state
-                        .entry(queue_name.clone())
-                        .or_insert_with(MessageQueue::new);
+                    let mut queue = queue.lock().unwrap();
                     queue.push_message(message.clone());
                     queue.subscribers()
                 };
@@ -72,25 +71,30 @@ impl Server {
                     .collect::<Vec<_>>();
 
                 if !failed_subscribers.is_empty() {
-                    let mut state = state.lock().unwrap();
-                    if let Some(queue) = state.get_mut(&queue_name) {
-                        queue.remove_subscribers(&failed_subscribers);
-                    }
+                    let mut queue = queue.lock().unwrap();
+                    queue.remove_subscribers(&failed_subscribers);
                 }
 
                 println!("Published message to queue");
             }
             PacketType::Subscribe => {
-                let mut state = state.lock().unwrap();
-                let queue = state
-                    .entry(queue_name.clone())
-                    .or_insert_with(MessageQueue::new);
+                let queue = Self::get_or_create_queue(&state, &queue_name);
+                let mut queue = queue.lock().unwrap();
                 queue.add_subscriber(TcpSubscriber::new(stream.try_clone().unwrap()));
                 println!("Subscriber added to queue");
-                drop(state);
+                drop(queue);
                 Self::maintain_subscription(stream);
             }
         }
+    }
+
+    fn get_or_create_queue(state: &SharedState, queue_name: &str) -> SharedQueue {
+        let mut state = state.lock().unwrap();
+        Arc::clone(
+            state
+                .entry(queue_name.to_string())
+                .or_insert_with(|| Arc::new(Mutex::new(MessageQueue::new()))),
+        )
     }
 
     fn maintain_subscription(_stream: TcpStream) {

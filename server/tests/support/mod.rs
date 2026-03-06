@@ -57,19 +57,26 @@ pub fn wait_for_message_count(
     let start = Instant::now();
 
     while start.elapsed() < timeout {
-        let has_count = match state.try_lock() {
-            Ok(state) => state
-                .get(queue_name)
-                .map(|queue| queue.message_count() >= expected_count)
-                .unwrap_or(false),
+        let queue = match state.try_lock() {
+            Ok(state) => state.get(queue_name).cloned(),
             Err(_) => {
                 thread::sleep(Duration::from_millis(10));
                 continue;
             }
         };
 
-        if has_count {
-            return true;
+        if let Some(queue) = queue {
+            let has_count = match queue.try_lock() {
+                Ok(queue) => queue.message_count() >= expected_count,
+                Err(_) => {
+                    thread::sleep(Duration::from_millis(10));
+                    continue;
+                }
+            };
+
+            if has_count {
+                return true;
+            }
         }
 
         thread::sleep(Duration::from_millis(10));
