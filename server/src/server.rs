@@ -1,7 +1,9 @@
 use std::collections::HashMap;
 use std::error::Error;
 use std::fmt;
+use std::io;
 use std::net::{TcpListener, TcpStream};
+use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::thread;
 
@@ -12,6 +14,7 @@ type SharedQueue = Arc<Mutex<MessageQueue<TcpSubscriber>>>;
 pub type SharedState = Arc<Mutex<HashMap<String, SharedQueue>>>;
 
 pub struct Server {
+    connection_pool_size: usize,
     state: SharedState,
     listener: TcpListener,
 }
@@ -58,10 +61,21 @@ impl From<NetworkError> for ServerError {
 }
 
 impl Server {
-    pub fn new(addr: &str) -> std::io::Result<Self> {
+    pub fn new(addr: &str, connection_pool_size: usize) -> io::Result<Self> {
+        if connection_pool_size == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "connection_pool_size must be greater than 0",
+            ));
+        }
+
         let listener = TcpListener::bind(addr)?;
         let state: SharedState = Arc::new(Mutex::new(HashMap::new()));
-        Ok(Self { state, listener })
+        Ok(Self {
+            connection_pool_size,
+            state,
+            listener,
+        })
     }
 
     pub fn state(&self) -> SharedState {
@@ -69,7 +83,43 @@ impl Server {
     }
 
     pub fn run(self) {
+        let (sender, receiver) = mpsc::channel::<TcpStream>();
+        let receiver = Arc::new(Mutex::new(receiver));
         let state = self.state;
+
+        // Spawn a fixed set of workers so connection handling threads are bounded.
+        // All workers share one `mpsc::Receiver<TcpStream>` via `Arc<Mutex<_>>`:
+        // each worker briefly locks the receiver, calls `recv()`, and gets the next
+        // available socket. That makes incoming connections fan out across workers
+        // without creating a new thread per client.
+        for _ in 0..self.connection_pool_size {
+            let receiver = Arc::clone(&receiver);
+            let state = Arc::clone(&state);
+
+            thread::spawn(move || {
+                loop {
+                    let stream = {
+                        let receiver = match receiver.lock() {
+                            Ok(receiver) => receiver,
+                            Err(_) => {
+                                eprintln!("connection receiver mutex poisoned");
+                                return;
+                            }
+                        };
+                        receiver.recv()
+                    };
+
+                    let stream = match stream {
+                        Ok(stream) => stream,
+                        Err(_) => return,
+                    };
+
+                    if let Err(error) = Self::handle_connection(stream, Arc::clone(&state)) {
+                        eprintln!("connection handler failed: {error}");
+                    }
+                }
+            });
+        }
 
         for incoming in self.listener.incoming() {
             let stream = match incoming {
@@ -80,13 +130,10 @@ impl Server {
                 }
             };
 
-            let state = Arc::clone(&state);
-
-            thread::spawn(move || {
-                if let Err(error) = Self::handle_connection(stream, state) {
-                    eprintln!("connection handler failed: {error}");
-                }
-            });
+            if sender.send(stream).is_err() {
+                eprintln!("all connection workers have stopped");
+                break;
+            }
         }
     }
 
@@ -123,10 +170,8 @@ impl Server {
             PacketType::Subscribe => {
                 let queue = Self::get_or_create_queue(&state, &queue_name)?;
                 let mut queue = queue.lock().map_err(|_| ServerError::QueuePoisoned)?;
-                queue.add_subscriber(TcpSubscriber::new(stream.try_clone()?));
+                queue.add_subscriber(TcpSubscriber::new(stream));
                 println!("Subscriber added to queue");
-                drop(queue);
-                Self::maintain_subscription(stream);
             }
         }
 
@@ -143,11 +188,5 @@ impl Server {
                 .entry(queue_name.to_string())
                 .or_insert_with(|| Arc::new(Mutex::new(MessageQueue::new()))),
         ))
-    }
-
-    fn maintain_subscription(_stream: TcpStream) {
-        loop {
-            thread::sleep(std::time::Duration::from_secs(60));
-        }
     }
 }
