@@ -15,6 +15,7 @@ What works today:
 - Fan-out of published message bytes to current subscribers.
 - Shared packet framing and serialization in `queutie_common`.
 - Basic producer CLI that publishes a hard-coded message.
+- Basic consumer CLI that subscribes to a hard-coded queue.
 - Integration/concurrency tests for key behavior and regressions.
 
 Important limitations right now:
@@ -47,9 +48,12 @@ queutie/
 │   └── src/
 │       ├── lib.rs
 │       └── network.rs          # packet/frame encode/decode
-└── producer_cli/
+├── producer_cli/
+│   ├── Cargo.toml
+│   └── src/main.rs             # simple publish client
+└── consumer_cli/
     ├── Cargo.toml
-    └── src/main.rs             # simple publish client
+    └── src/main.rs             # simple subscribe client
 ```
 
 ## Quick start
@@ -60,7 +64,10 @@ From the repository root:
 # 1) Run the server
 cargo run -p server
 
-# 2) In another terminal, publish one message
+# 2) In another terminal, start a consumer
+cargo run -p consumer_cli
+
+# 3) In another terminal, publish one message
 cargo run -p producer_cli
 ```
 
