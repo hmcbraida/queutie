@@ -66,11 +66,13 @@
 
 ---
 
-### 7. Integration test duplicates server logic
+### 7. ~~Integration test duplicates server logic~~ ✅ Done
 
 **Location:** `server/tests/integration_test.rs`
 
 **Problem:** Test re-implements the server instead of using the `Server` struct.
+
+**Status:** Fixed by starting the real `Server` in integration tests and extracting shared test helpers into `server/tests/support/mod.rs`.
 
 **Suggested fix:** Refactor test to use `Server::new()` and `server.run()` with proper setup/teardown.
 
@@ -83,3 +85,4 @@
 - ~~Separate modules for queue, server, network~~ ✅ Done
 - ~~Remove `on_publish` callback~~ ✅ Done
 - ~~Remove `Consume` packet type~~ ✅ Done
+- ~~Integration test duplicates server logic~~ ✅ Done
