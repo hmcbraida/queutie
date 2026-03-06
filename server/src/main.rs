@@ -1,29 +1,56 @@
+use std::collections::HashMap;
 use std::net::TcpListener;
+use std::sync::{Arc, Mutex};
+use std::thread;
 
-use queutie_common::network;
+mod queue;
 
-struct Configuration {
-    hostname: String,
-    port: u16,
-}
+use crate::queue::{Message, MessageQueue};
+use queutie_common::network::{self, PacketType};
 
-fn parse_args<T: Iterator<Item = String>>(mut args: T) -> Configuration {
-    args.next().unwrap();
-    let hostname = args.next().unwrap();
-    let port: u16 = args.next().unwrap().parse().unwrap();
+type SharedState = Arc<Mutex<HashMap<String, MessageQueue>>>;
 
-    Configuration { hostname, port }
+fn handle_connection(stream: std::net::TcpStream, state: SharedState) {
+    let packet = network::read_packet(&mut stream.try_clone().unwrap());
+
+    let queue_name = packet
+        .header
+        .packet_target
+        .trim_end_matches('\0')
+        .to_string();
+
+    let mut state = state.lock().unwrap();
+
+    match packet.header.packet_type {
+        PacketType::Publish => {
+            let message = Message::new(packet.body);
+            let queue = state.entry(queue_name).or_insert_with(MessageQueue::new);
+            queue.push_message(message.clone());
+            queue.push_message_to_subscribers(&message);
+            println!("Published message to queue");
+        }
+        PacketType::Subscribe => {
+            let queue = state.entry(queue_name).or_insert_with(MessageQueue::new);
+            queue.add_subscriber(Arc::new(Mutex::new(stream.try_clone().unwrap())));
+            println!("Subscriber added to queue");
+
+            drop(state);
+
+            loop {
+                thread::sleep(std::time::Duration::from_secs(1));
+            }
+        }
+    }
 }
 
 fn main() {
-    let configuration = parse_args(std::env::args());
+    let listener = TcpListener::bind("127.0.0.1:3001").unwrap();
+    let state: SharedState = Arc::new(Mutex::new(HashMap::new()));
 
-    let listener =
-        TcpListener::bind((configuration.hostname.as_str(), configuration.port)).unwrap();
-
-    for mut stream in listener.incoming().map(|x| x.unwrap()) {
-        let packet = network::read_packet(&mut stream);
-        println!("{:?}", packet);
-        // println!("{}", str::from_utf8(&packet.body).unwrap())
+    for stream in listener.incoming().map(|x| x.unwrap()) {
+        let state = Arc::clone(&state);
+        thread::spawn(move || {
+            handle_connection(stream, state);
+        });
     }
 }
