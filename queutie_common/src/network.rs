@@ -158,7 +158,7 @@ pub fn write_packet(stream: &mut TcpStream, packet: Packet) {
 
 #[cfg(test)]
 mod tests {
-    use super::{read_packet, write_packet, Packet, PacketHeader, PacketType};
+    use super::{Packet, PacketHeader, PacketType, read_packet, write_packet};
     use std::net::{TcpListener, TcpStream};
     use std::thread;
 
