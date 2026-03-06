@@ -21,7 +21,7 @@ What works today:
 Important limitations right now:
 
 - Queue data is in-memory only (no disk persistence).
-- Server still uses thread-per-connection.
+- Server uses a fixed worker pool for connection handling; each worker still uses blocking I/O per accepted socket.
 - Very limited protocol surface (`Publish` and `Subscribe` only).
 - Minimal client ergonomics (producer sends fixed queue/message).
 - No authentication, authorization, encryption, or backpressure controls.

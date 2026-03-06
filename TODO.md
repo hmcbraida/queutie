@@ -26,25 +26,25 @@
 
 ---
 
-### 3. Thread-per-connection
+### 3. ~~Thread-per-connection~~ ✅ Done
 
-**Location:** `server/src/server.rs:31-37`
+**Location:** `server/src/server.rs`
 
 **Problem:** Spawning a new `thread::spawn` for each connection is expensive at scale.
 
-**Suggested fix:** Use a thread pool (e.g., `rayon` or custom worker threads) or migrate to async (`tokio`).
+**Status:** Fixed by introducing a configurable fixed-size connection worker pool (`Server::new(addr, connection_pool_size)`), dispatching accepted sockets over an `mpsc` channel to bounded worker threads.
 
 ---
 
 ## Architectural Issues
 
-### 4. `maintain_subscription` is a no-op
+### 4. ~~`maintain_subscription` is a no-op~~ ✅ Done
 
-**Location:** `server/src/server.rs:65-69`
+**Location:** `server/src/server.rs`
 
 **Problem:** Just loops sleeping. Doesn't receive messages or do anything useful. Works only because push happens at publish time.
 
-**Suggested fix:** Either remove this function or implement proper subscription handling (e.g., listening for disconnect, sending keepalives).
+**Status:** Fixed by removing `maintain_subscription`. Subscribe handlers now register the socket with `TcpSubscriber` and return immediately; stale subscribers are cleaned up on send failure during publish fan-out.
 
 ---
 
@@ -86,6 +86,8 @@
 
 - ~~Blocking subscriber notification while holding lock~~ ✅ Done
 - ~~Global lock contention~~ ✅ Done
+- ~~Thread-per-connection~~ ✅ Done
+- ~~`maintain_subscription` is a no-op~~ ✅ Done
 - ~~Fix packet writes for payloads > 1024 bytes~~ ✅ Done
 - ~~Separate modules for queue, server, network~~ ✅ Done
 - ~~Remove `on_publish` callback~~ ✅ Done

@@ -23,6 +23,7 @@ impl Subscriber for TcpSubscriber {
         if let Ok(mut stream) = self.stream.lock() {
             stream.write_all(data).is_ok()
         } else {
+            println!("Send failed, pruning subscriber.");
             false
         }
     }

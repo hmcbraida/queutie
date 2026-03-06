@@ -160,6 +160,8 @@ impl Server {
                     queue.take_subscribers()
                 };
 
+                // retain_mut means we will eliminate any subscribers for whom
+                // the message send failed
                 subscribers.retain_mut(|sub| sub.send(message.contents()));
 
                 let mut queue = queue.lock().map_err(|_| ServerError::QueuePoisoned)?;
