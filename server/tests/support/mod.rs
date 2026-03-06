@@ -33,7 +33,7 @@ pub fn subscribe(stream: &mut TcpStream, queue: &str) {
         },
         Vec::new(),
     );
-    network::write_packet(stream, subscribe_packet);
+    network::write_packet(stream, subscribe_packet).expect("subscribe packet should be sent");
 }
 
 pub fn publish(stream: &mut TcpStream, queue: &str, body: Vec<u8>) {
@@ -44,7 +44,7 @@ pub fn publish(stream: &mut TcpStream, queue: &str, body: Vec<u8>) {
         },
         body,
     );
-    network::write_packet(stream, publish_packet);
+    network::write_packet(stream, publish_packet).expect("publish packet should be sent");
 }
 
 #[allow(dead_code)]

@@ -21,10 +21,9 @@ What works today:
 Important limitations right now:
 
 - Queue data is in-memory only (no disk persistence).
-- Server uses thread-per-connection and a global mutexed state map.
+- Server still uses thread-per-connection.
 - Very limited protocol surface (`Publish` and `Subscribe` only).
 - Minimal client ergonomics (producer sends fixed queue/message).
-- Error handling still has several `unwrap()`/panic paths.
 - No authentication, authorization, encryption, or backpressure controls.
 
 ## Project structure

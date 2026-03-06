@@ -1,6 +1,10 @@
 use std::{
+    error::Error,
+    fmt,
     io::{BufReader, BufWriter, Read, Write},
+    mem::size_of,
     net::TcpStream,
+    str,
 };
 
 const FRAME_HEADER_LENGTH: usize = 4;
@@ -24,19 +28,52 @@ impl PacketFrame {
     }
 }
 
-fn read_frame(buf_reader: &mut BufReader<&mut TcpStream>) -> PacketFrame {
-    let mut frame = PacketFrame::blank();
-    buf_reader.read_exact(&mut frame.header).unwrap();
-    buf_reader.read_exact(&mut frame.body).unwrap();
-
-    frame
+#[derive(Debug)]
+pub enum NetworkError {
+    Io(std::io::Error),
+    InvalidFrameLength { declared: usize, max: usize },
+    MalformedPacket(&'static str),
+    UnknownPacketType(u8),
+    InvalidPacketTarget(std::str::Utf8Error),
+    PacketTargetTooLong { max_len: usize, actual_len: usize },
 }
 
-fn write_frame(buf_writer: &mut BufWriter<&mut TcpStream>, frame: &PacketFrame) {
-    buf_writer.write_all(&frame.header).unwrap();
-    buf_writer.write_all(&frame.body).unwrap();
+impl fmt::Display for NetworkError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Io(error) => write!(f, "io error: {error}"),
+            Self::InvalidFrameLength { declared, max } => {
+                write!(f, "invalid frame length {declared}, max is {max}")
+            }
+            Self::MalformedPacket(reason) => write!(f, "malformed packet: {reason}"),
+            Self::UnknownPacketType(value) => write!(f, "unknown packet type byte: {value}"),
+            Self::InvalidPacketTarget(error) => {
+                write!(f, "packet target is not valid utf8: {error}")
+            }
+            Self::PacketTargetTooLong {
+                max_len,
+                actual_len,
+            } => {
+                write!(f, "packet target length {actual_len} exceeds max {max_len}")
+            }
+        }
+    }
+}
 
-    buf_writer.flush().unwrap();
+impl Error for NetworkError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::Io(error) => Some(error),
+            Self::InvalidPacketTarget(error) => Some(error),
+            _ => None,
+        }
+    }
+}
+
+impl From<std::io::Error> for NetworkError {
+    fn from(value: std::io::Error) -> Self {
+        Self::Io(value)
+    }
 }
 
 #[derive(Debug)]
@@ -66,17 +103,42 @@ impl Packet {
     }
 }
 
-pub fn read_packet(stream: &mut TcpStream) -> Packet {
+fn read_frame(buf_reader: &mut BufReader<&mut TcpStream>) -> Result<PacketFrame, NetworkError> {
+    let mut frame = PacketFrame::blank();
+    buf_reader.read_exact(&mut frame.header)?;
+    buf_reader.read_exact(&mut frame.body)?;
+
+    Ok(frame)
+}
+
+fn write_frame(
+    buf_writer: &mut BufWriter<&mut TcpStream>,
+    frame: &PacketFrame,
+) -> Result<(), NetworkError> {
+    buf_writer.write_all(&frame.header)?;
+    buf_writer.write_all(&frame.body)?;
+    buf_writer.flush()?;
+
+    Ok(())
+}
+
+pub fn read_packet(stream: &mut TcpStream) -> Result<Packet, NetworkError> {
     let mut packet_data: Vec<u8> = Vec::new();
 
     let mut buf_reader = BufReader::new(stream);
 
     loop {
-        let frame = read_frame(&mut buf_reader);
+        let frame = read_frame(&mut buf_reader)?;
 
         let frame_is_final = frame.header[0] == 0x01;
-        let frame_body_length =
-            u16::from_be_bytes(frame.header[1..=2].try_into().unwrap()) as usize;
+        let frame_body_length = u16::from_be_bytes([frame.header[1], frame.header[2]]) as usize;
+
+        if frame_body_length > FRAME_BODY_LENGTH {
+            return Err(NetworkError::InvalidFrameLength {
+                declared: frame_body_length,
+                max: FRAME_BODY_LENGTH,
+            });
+        }
 
         packet_data.extend_from_slice(&frame.body[..frame_body_length]);
 
@@ -85,22 +147,30 @@ pub fn read_packet(stream: &mut TcpStream) -> Packet {
         }
     }
 
+    if packet_data.len() < PACKET_HEADER_SIZE {
+        return Err(NetworkError::MalformedPacket(
+            "packet payload is smaller than protocol header",
+        ));
+    }
+
     let body = packet_data.split_off(PACKET_HEADER_SIZE);
     let packet_type = match packet_data[0] {
         0 => PacketType::Publish,
         1 => PacketType::Subscribe,
-        _ => panic!("unknown package type"),
+        value => return Err(NetworkError::UnknownPacketType(value)),
     };
-    let packet_target = String::from(str::from_utf8(&packet_data[1..PACKET_TARGET_SIZE]).unwrap());
+    let packet_target = str::from_utf8(&packet_data[1..1 + PACKET_TARGET_SIZE])
+        .map_err(NetworkError::InvalidPacketTarget)?
+        .to_string();
     let header = PacketHeader {
         packet_target,
         packet_type,
     };
 
-    Packet { header, body }
+    Ok(Packet { header, body })
 }
 
-pub fn write_packet(stream: &mut TcpStream, packet: Packet) {
+pub fn write_packet(stream: &mut TcpStream, packet: Packet) -> Result<(), NetworkError> {
     let Packet { header, mut body } = packet;
 
     let mut packet_data = Vec::from([0u8; PACKET_HEADER_SIZE]);
@@ -114,7 +184,10 @@ pub fn write_packet(stream: &mut TcpStream, packet: Packet) {
     };
     let packet_target_bytes = packet_target.as_bytes();
     if packet_target_bytes.len() > PACKET_TARGET_SIZE {
-        panic!("Packet target too big!")
+        return Err(NetworkError::PacketTargetTooLong {
+            max_len: PACKET_TARGET_SIZE,
+            actual_len: packet_target_bytes.len(),
+        });
     }
     packet_data[1..1 + packet_target_bytes.len()].copy_from_slice(packet_target_bytes);
     packet_data.append(&mut body);
@@ -152,13 +225,15 @@ pub fn write_packet(stream: &mut TcpStream, packet: Packet) {
             body: frame_body,
         };
 
-        write_frame(&mut buf_writer, &frame);
+        write_frame(&mut buf_writer, &frame)?;
     }
+
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{Packet, PacketHeader, PacketType, read_packet, write_packet};
+    use super::{NetworkError, Packet, PacketHeader, PacketType, read_packet, write_packet};
     use std::net::{TcpListener, TcpStream};
     use std::thread;
 
@@ -170,7 +245,7 @@ mod tests {
 
         let server_handle = thread::spawn(move || {
             let (mut socket, _) = listener.accept().unwrap();
-            let packet = read_packet(&mut socket);
+            let packet = read_packet(&mut socket).expect("packet should decode");
 
             assert!(matches!(packet.header.packet_type, PacketType::Publish));
             assert_eq!(
@@ -190,8 +265,30 @@ mod tests {
             vec![0xAB; 4097],
         );
 
-        write_packet(&mut client, packet);
+        write_packet(&mut client, packet).expect("packet should encode and send");
 
         server_handle.join().unwrap();
+    }
+
+    #[test]
+    fn write_packet_rejects_target_longer_than_protocol_limit() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let _server_handle = thread::spawn(move || {
+            let _ = listener.accept();
+        });
+
+        let mut client = TcpStream::connect(addr).unwrap();
+        let packet = Packet::new(
+            PacketHeader {
+                packet_type: PacketType::Publish,
+                packet_target: String::from("queue_name_that_is_too_long"),
+            },
+            b"message".to_vec(),
+        );
+
+        let error = write_packet(&mut client, packet).unwrap_err();
+
+        assert!(matches!(error, NetworkError::PacketTargetTooLong { .. }));
     }
 }

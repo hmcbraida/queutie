@@ -2,7 +2,7 @@ use std::net::TcpStream;
 
 use queutie_common::network::{self, PacketHeader, PacketType};
 
-fn main() {
+fn main() -> Result<(), Box<dyn std::error::Error>> {
     let buf = Vec::from("hello world".as_bytes());
     let packet = network::Packet::new(
         PacketHeader {
@@ -12,7 +12,9 @@ fn main() {
         buf,
     );
 
-    let mut stream = TcpStream::connect("127.0.0.1:3001").unwrap();
+    let mut stream = TcpStream::connect("127.0.0.1:3001")?;
 
-    network::write_packet(&mut stream, packet);
+    network::write_packet(&mut stream, packet)?;
+
+    Ok(())
 }
