@@ -84,3 +84,41 @@ pub fn wait_for_message_count(
 
     false
 }
+
+#[allow(dead_code)]
+pub fn wait_for_subscriber_count(
+    state: &SharedState,
+    queue_name: &str,
+    expected_count: usize,
+    timeout: Duration,
+) -> bool {
+    let start = Instant::now();
+
+    while start.elapsed() < timeout {
+        let queue = match state.try_lock() {
+            Ok(state) => state.get(queue_name).cloned(),
+            Err(_) => {
+                thread::sleep(Duration::from_millis(10));
+                continue;
+            }
+        };
+
+        if let Some(queue) = queue {
+            let has_count = match queue.try_lock() {
+                Ok(queue) => queue.subscriber_count() == expected_count,
+                Err(_) => {
+                    thread::sleep(Duration::from_millis(10));
+                    continue;
+                }
+            };
+
+            if has_count {
+                return true;
+            }
+        }
+
+        thread::sleep(Duration::from_millis(10));
+    }
+
+    false
+}
