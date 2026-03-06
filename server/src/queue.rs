@@ -28,6 +28,22 @@ impl Subscriber for TcpSubscriber {
     }
 }
 
+impl Clone for TcpSubscriber {
+    fn clone(&self) -> Self {
+        Self {
+            stream: Arc::clone(&self.stream),
+        }
+    }
+}
+
+impl PartialEq for TcpSubscriber {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.stream, &other.stream)
+    }
+}
+
+impl Eq for TcpSubscriber {}
+
 #[derive(Debug, Clone)]
 pub struct Message {
     contents: Box<[u8]>,
@@ -95,6 +111,21 @@ impl<S: Subscriber> MessageQueue<S> {
 
     pub fn subscriber_count(&self) -> usize {
         self.subscribers.len()
+    }
+
+    pub fn subscribers(&self) -> Vec<S>
+    where
+        S: Clone,
+    {
+        self.subscribers.clone()
+    }
+
+    pub fn remove_subscribers(&mut self, to_remove: &[S])
+    where
+        S: PartialEq,
+    {
+        self.subscribers
+            .retain(|sub| !to_remove.iter().any(|target| target == sub));
     }
 }
 

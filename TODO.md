@@ -2,11 +2,13 @@
 
 ## Performance Issues
 
-### 1. Blocking subscriber notification while holding lock
+### 1. ~~Blocking subscriber notification while holding lock~~ ✅ Done
 
 **Location:** `server/src/server.rs:50-53`
 
 **Problem:** `push_message_to_subscribers` is called while holding the queue mutex. Slow or unresponsive subscribers block all queue operations.
+
+**Status:** Fixed by moving subscriber notification outside the mutex and cleaning up failed subscribers after re-locking briefly.
 
 **Suggested fix:** Spawn a separate task/thread to handle subscriber notifications, or use a channel to hand off the notification work outside the lock.
 
@@ -76,6 +78,8 @@
 
 ## Completed (or deferred)
 
+- ~~Blocking subscriber notification while holding lock~~ ✅ Done
+- ~~Fix packet writes for payloads > 1024 bytes~~ ✅ Done
 - ~~Separate modules for queue, server, network~~ ✅ Done
 - ~~Remove `on_publish` callback~~ ✅ Done
 - ~~Remove `Consume` packet type~~ ✅ Done

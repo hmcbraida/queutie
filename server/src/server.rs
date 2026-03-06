@@ -3,7 +3,7 @@ use std::net::{TcpListener, TcpStream};
 use std::sync::{Arc, Mutex};
 use std::thread;
 
-use crate::queue::{Message, MessageQueue, TcpSubscriber};
+use crate::queue::{Message, MessageQueue, Subscriber, TcpSubscriber};
 
 pub type SharedState = Arc<Mutex<HashMap<String, MessageQueue<TcpSubscriber>>>>;
 
@@ -47,19 +47,41 @@ impl Server {
             .trim_end_matches('\0')
             .to_string();
 
-        let mut state = state.lock().unwrap();
-
         match packet.header.packet_type {
             PacketType::Publish => {
                 let message = Message::new(packet.body);
-                let queue = state
-                    .entry(queue_name.clone())
-                    .or_insert_with(MessageQueue::new);
-                queue.push_message(message.clone());
-                queue.push_message_to_subscribers(&message);
+
+                let subscribers = {
+                    let mut state = state.lock().unwrap();
+                    let queue = state
+                        .entry(queue_name.clone())
+                        .or_insert_with(MessageQueue::new);
+                    queue.push_message(message.clone());
+                    queue.subscribers()
+                };
+
+                let failed_subscribers = subscribers
+                    .into_iter()
+                    .filter_map(|mut sub| {
+                        if sub.send(message.contents()) {
+                            None
+                        } else {
+                            Some(sub)
+                        }
+                    })
+                    .collect::<Vec<_>>();
+
+                if !failed_subscribers.is_empty() {
+                    let mut state = state.lock().unwrap();
+                    if let Some(queue) = state.get_mut(&queue_name) {
+                        queue.remove_subscribers(&failed_subscribers);
+                    }
+                }
+
                 println!("Published message to queue");
             }
             PacketType::Subscribe => {
+                let mut state = state.lock().unwrap();
                 let queue = state
                     .entry(queue_name.clone())
                     .or_insert_with(MessageQueue::new);

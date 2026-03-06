@@ -33,8 +33,8 @@ fn read_frame(buf_reader: &mut BufReader<&mut TcpStream>) -> PacketFrame {
 }
 
 fn write_frame(buf_writer: &mut BufWriter<&mut TcpStream>, frame: &PacketFrame) {
-    buf_writer.write(&frame.header).unwrap();
-    buf_writer.write(&frame.body).unwrap();
+    buf_writer.write_all(&frame.header).unwrap();
+    buf_writer.write_all(&frame.body).unwrap();
 
     buf_writer.flush().unwrap();
 }
@@ -143,7 +143,8 @@ pub fn write_packet(stream: &mut TcpStream, packet: Packet) {
 
         // Next we construct the frame body by copying from the remaining packet.
         let mut frame_body = [0u8; FRAME_BODY_LENGTH];
-        frame_body[..bytes_to_write].copy_from_slice(&packet_data[read_offset..]);
+        frame_body[..bytes_to_write]
+            .copy_from_slice(&packet_data[read_offset..read_offset + bytes_to_write]);
         read_offset += bytes_to_write;
 
         let frame = PacketFrame {
@@ -152,5 +153,45 @@ pub fn write_packet(stream: &mut TcpStream, packet: Packet) {
         };
 
         write_frame(&mut buf_writer, &frame);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{read_packet, write_packet, Packet, PacketHeader, PacketType};
+    use std::net::{TcpListener, TcpStream};
+    use std::thread;
+
+    #[test]
+    fn write_packet_handles_payload_larger_than_frame_size() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let payload = vec![0xAB; 4097];
+
+        let server_handle = thread::spawn(move || {
+            let (mut socket, _) = listener.accept().unwrap();
+            let packet = read_packet(&mut socket);
+
+            assert!(matches!(packet.header.packet_type, PacketType::Publish));
+            assert_eq!(
+                packet.header.packet_target.trim_end_matches('\0'),
+                "big_queue"
+            );
+            assert_eq!(packet.body.len(), payload.len());
+            assert_eq!(packet.body, payload);
+        });
+
+        let mut client = TcpStream::connect(addr).unwrap();
+        let packet = Packet::new(
+            PacketHeader {
+                packet_type: PacketType::Publish,
+                packet_target: String::from("big_queue"),
+            },
+            vec![0xAB; 4097],
+        );
+
+        write_packet(&mut client, packet);
+
+        server_handle.join().unwrap();
     }
 }
