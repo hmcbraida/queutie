@@ -4,6 +4,9 @@ use std::thread;
 use std::time::Duration;
 use std::time::Instant;
 
+use queutie_common::network::{self, PacketHeader, PacketType};
+use server::Server;
+
 mod support;
 
 #[test]
@@ -58,4 +61,51 @@ fn test_disconnected_subscriber_is_pruned_after_failed_publish() {
     }
 
     panic!("Disconnected subscriber was not pruned after publish retries");
+}
+
+#[test]
+fn test_publish_dropped_when_queue_is_full() {
+    let queue_name = "full_queue";
+    let addr = support::reserve_ephemeral_addr();
+    let server = Server::new(&addr, 4, 1).unwrap();
+    let state = server.state();
+
+    thread::spawn(move || {
+        server.run();
+    });
+
+    thread::sleep(Duration::from_millis(100));
+
+    let mut publisher1 = TcpStream::connect(&addr).unwrap();
+    support::publish(&mut publisher1, queue_name, b"first".to_vec());
+
+    assert!(
+        support::wait_for_message_count(&state, queue_name, 1, Duration::from_secs(1)),
+        "First publish did not reach queue in time"
+    );
+
+    let mut publisher2 = TcpStream::connect(&addr).unwrap();
+    let publish_packet = network::Packet::new(
+        PacketHeader {
+            packet_target: String::from(queue_name),
+            packet_type: PacketType::Publish,
+        },
+        b"second".to_vec(),
+    );
+    network::write_packet(&mut publisher2, publish_packet).unwrap();
+
+    let response = network::read_packet(&mut publisher2).unwrap();
+    assert!(matches!(response.header.packet_type, PacketType::QueueFull));
+    assert_eq!(
+        response.header.packet_target.trim_end_matches('\0'),
+        queue_name
+    );
+    assert_eq!(response.body, b"queue is full");
+
+    let queue = {
+        let state_guard = state.lock().unwrap();
+        state_guard.get(queue_name).cloned().unwrap()
+    };
+    let queue_guard = queue.lock().unwrap();
+    assert_eq!(queue_guard.message_count(), 1);
 }

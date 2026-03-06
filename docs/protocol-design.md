@@ -6,7 +6,7 @@ It is a design snapshot of what is implemented now, including known constraints.
 ## Goals and scope
 
 - Keep transport simple: raw TCP with a small custom framing format.
-- Support two operations: publish a message, subscribe to a queue.
+- Support publish/subscribe plus server backpressure responses.
 - Keep shared protocol code in `queutie_common/src/network.rs`.
 
 Out of scope today:
@@ -14,7 +14,7 @@ Out of scope today:
 - Authentication/authorization
 - Encryption/TLS negotiation
 - Message acknowledgements or retries
-- Backpressure, flow control, and persistence
+- Flow control beyond fixed queue caps and persistence
 
 ## Components
 
@@ -29,6 +29,7 @@ Out of scope today:
 - `header.packet_type`: operation selector
   - `0` => `Publish`
   - `1` => `Subscribe`
+  - `2` => `QueueFull` (server -> producer rejection when queue cap is reached)
 - `header.packet_target`: queue name
 - `body`: payload bytes (`Vec<u8>`)
 
@@ -114,6 +115,7 @@ On `Subscribe`:
 - No protocol version field or negotiation.
 - Queue target width is constrained by fixed header encoding.
 - Several production paths still rely on `unwrap()`.
+- Backpressure is drop-based only; there is no producer retry/ack semantics.
 
 ## Testing coverage (protocol-related)
 

@@ -14,7 +14,7 @@ pub fn reserve_ephemeral_addr() -> String {
 }
 
 pub fn start_server(addr: &str) -> SharedState {
-    let server = Server::new(addr, 4).unwrap();
+    let server = Server::new(addr, 4, 1024).unwrap();
     let state = server.state();
 
     thread::spawn(move || {

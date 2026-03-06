@@ -21,10 +21,10 @@ struct PacketFrame {
 
 impl PacketFrame {
     pub fn blank() -> Self {
-        return PacketFrame {
+        PacketFrame {
             header: [0u8; FRAME_HEADER_LENGTH],
             body: [0u8; FRAME_BODY_LENGTH],
-        };
+        }
     }
 }
 
@@ -80,6 +80,7 @@ impl From<std::io::Error> for NetworkError {
 pub enum PacketType {
     Publish,
     Subscribe,
+    QueueFull,
 }
 
 #[derive(Debug)]
@@ -99,7 +100,7 @@ pub struct Packet {
 
 impl Packet {
     pub fn new(header: PacketHeader, body: Vec<u8>) -> Self {
-        return Packet { header, body };
+        Packet { header, body }
     }
 }
 
@@ -157,6 +158,7 @@ pub fn read_packet(stream: &mut TcpStream) -> Result<Packet, NetworkError> {
     let packet_type = match packet_data[0] {
         0 => PacketType::Publish,
         1 => PacketType::Subscribe,
+        2 => PacketType::QueueFull,
         value => return Err(NetworkError::UnknownPacketType(value)),
     };
     let packet_target = str::from_utf8(&packet_data[1..1 + PACKET_TARGET_SIZE])
@@ -181,6 +183,7 @@ pub fn write_packet(stream: &mut TcpStream, packet: Packet) -> Result<(), Networ
     packet_data[0] = match packet_type {
         PacketType::Publish => 0,
         PacketType::Subscribe => 1,
+        PacketType::QueueFull => 2,
     };
     let packet_target_bytes = packet_target.as_bytes();
     if packet_target_bytes.len() > PACKET_TARGET_SIZE {
@@ -290,5 +293,36 @@ mod tests {
         let error = write_packet(&mut client, packet).unwrap_err();
 
         assert!(matches!(error, NetworkError::PacketTargetTooLong { .. }));
+    }
+
+    #[test]
+    fn queue_full_packet_roundtrips() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let server_handle = thread::spawn(move || {
+            let (mut socket, _) = listener.accept().unwrap();
+            let packet = read_packet(&mut socket).expect("packet should decode");
+
+            assert!(matches!(packet.header.packet_type, PacketType::QueueFull));
+            assert_eq!(
+                packet.header.packet_target.trim_end_matches('\0'),
+                "test_queue"
+            );
+            assert_eq!(packet.body, b"queue is full");
+        });
+
+        let mut client = TcpStream::connect(addr).unwrap();
+        let packet = Packet::new(
+            PacketHeader {
+                packet_type: PacketType::QueueFull,
+                packet_target: String::from("test_queue"),
+            },
+            b"queue is full".to_vec(),
+        );
+
+        write_packet(&mut client, packet).expect("packet should encode and send");
+
+        server_handle.join().unwrap();
     }
 }

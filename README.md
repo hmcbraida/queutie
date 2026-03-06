@@ -10,7 +10,7 @@ production-ready durability or scaling.
 
 What works today:
 
-- TCP server that accepts `Publish` and `Subscribe` packets.
+- TCP server that accepts `Publish`/`Subscribe` packets and may return `QueueFull` rejections.
 - In-memory queue state keyed by queue name.
 - Fan-out of published message bytes to current subscribers.
 - Shared packet framing and serialization in `queutie_common`.
@@ -22,9 +22,9 @@ Important limitations right now:
 
 - Queue data is in-memory only (no disk persistence).
 - Server uses a fixed worker pool for connection handling; each worker still uses blocking I/O per accepted socket.
-- Very limited protocol surface (`Publish` and `Subscribe` only).
+- Limited protocol surface (`Publish`, `Subscribe`, and `QueueFull`).
 - Minimal client ergonomics (producer sends fixed queue/message).
-- No authentication, authorization, encryption, or backpressure controls.
+- No authentication, authorization, encryption, or persistence.
 
 ## Project structure
 

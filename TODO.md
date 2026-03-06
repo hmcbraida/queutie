@@ -48,13 +48,13 @@
 
 ---
 
-### 5. No backpressure
+### 5. ~~No backpressure~~ ✅ Done
 
 **Location:** `server/src/queue.rs:31`
 
 **Problem:** `VecDeque` has unbounded capacity. Memory grows indefinitely if producers outpace subscribers.
 
-**Suggested fix:** Add bounded queue with backpressure (return error or block when full) or implement message TTL/eviction.
+**Status:** Fixed by adding a per-server `max_queue_messages` limit. Publish requests that would exceed queue capacity are dropped, and the server responds to the producer with a `QueueFull` packet.
 
 ---
 
@@ -88,6 +88,7 @@
 - ~~Global lock contention~~ ✅ Done
 - ~~Thread-per-connection~~ ✅ Done
 - ~~`maintain_subscription` is a no-op~~ ✅ Done
+- ~~No backpressure~~ ✅ Done
 - ~~Fix packet writes for payloads > 1024 bytes~~ ✅ Done
 - ~~Separate modules for queue, server, network~~ ✅ Done
 - ~~Remove `on_publish` callback~~ ✅ Done
