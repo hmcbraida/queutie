@@ -1,71 +1,18 @@
-use std::collections::{HashMap, VecDeque};
-use std::io::{Read, Write};
+use std::io::Read;
 use std::net::{TcpListener, TcpStream};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
 use queutie_common::network::{self, PacketHeader, PacketType};
+use server::queue::{Message, MessageQueue, TcpSubscriber};
 
-#[derive(Clone, Debug)]
-struct Message {
-    contents: Box<[u8]>,
-}
-
-impl Message {
-    fn new<T: Into<Box<[u8]>>>(contents: T) -> Self {
-        Self {
-            contents: contents.into(),
-        }
-    }
-
-    fn contents(&self) -> &[u8] {
-        &self.contents
-    }
-}
-
-struct MessageQueue {
-    messages: VecDeque<Message>,
-    subscribers: Vec<Arc<Mutex<TcpStream>>>,
-}
-
-impl MessageQueue {
-    fn new() -> Self {
-        Self {
-            messages: VecDeque::new(),
-            subscribers: Vec::new(),
-        }
-    }
-
-    fn push_message(&mut self, message: Message) {
-        self.messages.push_back(message);
-    }
-
-    fn add_subscriber(&mut self, subscriber: Arc<Mutex<TcpStream>>) {
-        self.subscribers.push(subscriber);
-    }
-
-    fn push_message_to_subscribers(&mut self, message: &Message) {
-        let mut disconnected = Vec::new();
-
-        for (i, subscriber) in self.subscribers.iter().enumerate() {
-            if let Ok(mut stream) = subscriber.lock() {
-                if stream.write_all(message.contents()).is_err() {
-                    disconnected.push(i);
-                }
-            }
-        }
-
-        for i in disconnected.iter().rev() {
-            self.subscribers.remove(*i);
-        }
-    }
-}
+type TestState = Arc<Mutex<std::collections::HashMap<String, MessageQueue<TcpSubscriber>>>>;
 
 fn start_server(addr: String) {
     thread::spawn(move || {
         let listener = TcpListener::bind(&addr).unwrap();
-        let state: Arc<Mutex<HashMap<String, MessageQueue>>> = Arc::new(Mutex::new(HashMap::new()));
+        let state: TestState = Arc::new(Mutex::new(std::collections::HashMap::new()));
 
         for stream in listener.incoming().map(|x| x.unwrap()) {
             let state = Arc::clone(&state);
@@ -78,22 +25,37 @@ fn start_server(addr: String) {
                     .packet_target
                     .trim_end_matches('\0')
                     .to_string();
-                let mut state = state.lock().unwrap();
 
                 match packet.header.packet_type {
                     PacketType::Publish => {
+                        let state_for_notify = Arc::clone(&state);
                         let message = Message::new(packet.body);
-                        let queue = state.entry(queue_name).or_insert_with(MessageQueue::new);
-                        queue.push_message(message.clone());
-                        queue.push_message_to_subscribers(&message);
+                        {
+                            let mut state = state.lock().unwrap();
+                            let queue = state
+                                .entry(queue_name.clone())
+                                .or_insert_with(MessageQueue::new);
+                            queue.push_message(message.clone());
+                        }
+                        {
+                            let mut state = state_for_notify.lock().unwrap();
+                            if let Some(queue) = state.get_mut(&queue_name) {
+                                queue.push_message_to_subscribers(&message);
+                            }
+                        }
                     }
                     PacketType::Subscribe => {
-                        let queue = state.entry(queue_name).or_insert_with(MessageQueue::new);
-                        queue.add_subscriber(Arc::new(Mutex::new(stream)));
-
+                        let stream = stream.try_clone().unwrap();
+                        {
+                            let mut state = state.lock().unwrap();
+                            let queue = state
+                                .entry(queue_name.clone())
+                                .or_insert_with(MessageQueue::new);
+                            queue.add_subscriber(TcpSubscriber::new(stream));
+                        }
                         drop(state);
                         loop {
-                            thread::sleep(Duration::from_secs(1));
+                            thread::sleep(Duration::from_secs(60));
                         }
                     }
                 }

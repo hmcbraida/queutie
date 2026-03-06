@@ -1,7 +1,32 @@
 use std::collections::VecDeque;
 use std::io::Write;
-use std::net::TcpStream;
 use std::sync::{Arc, Mutex};
+
+pub trait Subscriber: Send + Sync {
+    fn send(&mut self, data: &[u8]) -> bool;
+}
+
+pub struct TcpSubscriber {
+    stream: Arc<Mutex<std::net::TcpStream>>,
+}
+
+impl TcpSubscriber {
+    pub fn new(stream: std::net::TcpStream) -> Self {
+        Self {
+            stream: Arc::new(Mutex::new(stream)),
+        }
+    }
+}
+
+impl Subscriber for TcpSubscriber {
+    fn send(&mut self, data: &[u8]) -> bool {
+        if let Ok(mut stream) = self.stream.lock() {
+            stream.write_all(data).is_ok()
+        } else {
+            false
+        }
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct Message {
@@ -16,17 +41,17 @@ impl Message {
     where
         T: Into<Box<[u8]>>,
     {
-        return Self {
-            contents: (contents.into()),
-        };
+        Self {
+            contents: contents.into(),
+        }
     }
 
     pub fn from_string(s: String) -> Self {
-        return Message::new(s.into_bytes());
+        Message::new(s.into_bytes())
     }
 
     pub fn to_string(self) -> Result<String, StringDecodeError> {
-        String::from_utf8(self.contents.to_vec()).map_err(|_| StringDecodeError)
+        String::from_utf8(self.contents.into_vec()).map_err(|_| StringDecodeError)
     }
 
     pub fn contents(&self) -> &[u8] {
@@ -34,12 +59,12 @@ impl Message {
     }
 }
 
-pub struct MessageQueue {
+pub struct MessageQueue<S: Subscriber = TcpSubscriber> {
     messages: VecDeque<Message>,
-    subscribers: Vec<Arc<Mutex<TcpStream>>>,
+    subscribers: Vec<S>,
 }
 
-impl MessageQueue {
+impl<S: Subscriber> MessageQueue<S> {
     pub fn new() -> Self {
         Self {
             messages: VecDeque::new(),
@@ -48,30 +73,33 @@ impl MessageQueue {
     }
 
     pub fn pop_message(&mut self) -> Option<Message> {
-        return self.messages.pop_front();
+        self.messages.pop_front()
     }
 
     pub fn push_message(&mut self, message: Message) {
         self.messages.push_back(message);
     }
 
-    pub fn add_subscriber(&mut self, subscriber: Arc<Mutex<TcpStream>>) {
+    pub fn add_subscriber(&mut self, subscriber: S) {
         self.subscribers.push(subscriber);
     }
 
     pub fn push_message_to_subscribers(&mut self, message: &Message) {
-        let mut disconnected = Vec::new();
+        self.subscribers
+            .retain_mut(|sub| sub.send(message.contents()));
+    }
 
-        for (i, subscriber) in self.subscribers.iter().enumerate() {
-            if let Ok(mut stream) = subscriber.lock() {
-                if stream.write_all(message.contents()).is_err() {
-                    disconnected.push(i);
-                }
-            }
-        }
+    pub fn message_count(&self) -> usize {
+        self.messages.len()
+    }
 
-        for i in disconnected.iter().rev() {
-            self.subscribers.remove(*i);
-        }
+    pub fn subscriber_count(&self) -> usize {
+        self.subscribers.len()
+    }
+}
+
+impl<S: Subscriber> Default for MessageQueue<S> {
+    fn default() -> Self {
+        Self::new()
     }
 }
