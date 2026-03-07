@@ -66,6 +66,7 @@ fn test_disconnected_subscriber_is_pruned_after_failed_publish() {
 #[test]
 fn test_publish_dropped_when_queue_is_full() {
     let queue_name = "full_queue";
+    let rejected_packet_id = 202;
     let addr = support::reserve_ephemeral_addr();
     let server = Server::new(&addr, 4, 1).unwrap();
     let state = server.state();
@@ -89,6 +90,7 @@ fn test_publish_dropped_when_queue_is_full() {
         PacketHeader {
             packet_target: String::from(queue_name),
             packet_type: PacketType::Publish,
+            packet_id: rejected_packet_id,
         },
         b"second".to_vec(),
     );
@@ -100,7 +102,52 @@ fn test_publish_dropped_when_queue_is_full() {
         response.header.packet_target.trim_end_matches('\0'),
         queue_name
     );
+    assert_eq!(response.header.packet_id, rejected_packet_id);
     assert_eq!(response.body, b"queue is full");
+
+    let queue = {
+        let state_guard = state.lock().unwrap();
+        state_guard.get(queue_name).cloned().unwrap()
+    };
+    let queue_guard = queue.lock().unwrap();
+    assert_eq!(queue_guard.message_count(), 1);
+}
+
+#[test]
+fn test_publish_ack_echoes_packet_id_for_accepted_message() {
+    let queue_name = "ack_queue";
+    let accepted_packet_id = 101;
+    let addr = support::reserve_ephemeral_addr();
+    let server = Server::new(&addr, 4, 10).unwrap();
+    let state = server.state();
+
+    thread::spawn(move || {
+        server.run();
+    });
+
+    thread::sleep(Duration::from_millis(100));
+
+    let mut publisher = TcpStream::connect(&addr).unwrap();
+    let publish_packet = network::Packet::new(
+        PacketHeader {
+            packet_target: String::from(queue_name),
+            packet_type: PacketType::Publish,
+            packet_id: accepted_packet_id,
+        },
+        b"hello ack".to_vec(),
+    );
+    network::write_packet(&mut publisher, publish_packet).unwrap();
+
+    let response = network::read_packet(&mut publisher).unwrap();
+    assert!(matches!(
+        response.header.packet_type,
+        PacketType::PublishAck
+    ));
+    assert_eq!(
+        response.header.packet_target.trim_end_matches('\0'),
+        queue_name
+    );
+    assert_eq!(response.header.packet_id, accepted_packet_id);
 
     let queue = {
         let state_guard = state.lock().unwrap();

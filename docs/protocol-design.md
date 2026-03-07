@@ -6,7 +6,7 @@ It is a design snapshot of what is implemented now, including known constraints.
 ## Goals and scope
 
 - Keep transport simple: raw TCP with a small custom framing format.
-- Support publish/subscribe plus server backpressure responses.
+- Support publish/subscribe plus server ACK/NACK responses.
 - Keep shared protocol code in `queutie_common/src/network.rs`.
 
 Out of scope today:
@@ -30,7 +30,9 @@ Out of scope today:
   - `0` => `Publish`
   - `1` => `Subscribe`
   - `2` => `QueueFull` (server -> producer rejection when queue cap is reached)
+  - `3` => `PublishAck` (server -> producer acceptance after enqueue)
 - `header.packet_target`: queue name
+- `header.packet_id`: client-generated correlation id (`u64`)
 - `body`: payload bytes (`Vec<u8>`)
 
 Constants from implementation:
@@ -42,6 +44,7 @@ Current layout of packet header bytes before framing:
 
 - Byte `0`: packet type (`0`/`1`)
 - Bytes `1..16` region: queue target bytes (NUL padded by default)
+- Bytes `17..24`: packet id (`u64`, big-endian)
 - Remaining header bytes up to 32: reserved/zero-filled
 
 Note: read-side target extraction currently uses `packet_data[1..PACKET_TARGET_SIZE]`,

@@ -27,10 +27,7 @@ pub fn start_server(addr: &str) -> SharedState {
 
 pub fn subscribe(stream: &mut TcpStream, queue: &str) {
     let subscribe_packet = network::Packet::new(
-        PacketHeader {
-            packet_target: String::from(queue),
-            packet_type: PacketType::Subscribe,
-        },
+        PacketHeader::with_zero_id(PacketType::Subscribe, queue),
         Vec::new(),
     );
     network::write_packet(stream, subscribe_packet).expect("subscribe packet should be sent");
@@ -38,10 +35,7 @@ pub fn subscribe(stream: &mut TcpStream, queue: &str) {
 
 pub fn publish(stream: &mut TcpStream, queue: &str, body: Vec<u8>) {
     let publish_packet = network::Packet::new(
-        PacketHeader {
-            packet_target: String::from(queue),
-            packet_type: PacketType::Publish,
-        },
+        PacketHeader::with_random_id(PacketType::Publish, queue),
         body,
     );
     network::write_packet(stream, publish_packet).expect("publish packet should be sent");

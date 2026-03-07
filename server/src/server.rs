@@ -154,15 +154,17 @@ impl Server {
         let mut stream = stream;
         let packet = network::read_packet(&mut stream)?;
 
-        let queue_name = packet
-            .header
-            .packet_target
-            .trim_end_matches('\0')
-            .to_string();
+        let network::Packet { header, body } = packet;
+        let PacketHeader {
+            packet_type,
+            packet_target,
+            packet_id,
+        } = header;
+        let queue_name = packet_target.trim_end_matches('\0').to_string();
 
-        match packet.header.packet_type {
+        match packet_type {
             PacketType::Publish => {
-                let message = Message::new(packet.body);
+                let message = Message::new(body);
                 let queue = Self::get_or_create_queue(&state, &queue_name)?;
 
                 let mut subscribers = {
@@ -172,7 +174,8 @@ impl Server {
                         let queue_full_packet = network::Packet::new(
                             PacketHeader {
                                 packet_type: PacketType::QueueFull,
-                                packet_target: queue_name,
+                                packet_target: queue_name.clone(),
+                                packet_id,
                             },
                             b"queue is full".to_vec(),
                         );
@@ -193,6 +196,16 @@ impl Server {
                 let mut queue = queue.lock().map_err(|_| ServerError::QueuePoisoned)?;
                 queue.restore_subscribers(subscribers);
 
+                let publish_ack_packet = network::Packet::new(
+                    PacketHeader {
+                        packet_type: PacketType::PublishAck,
+                        packet_target: queue_name,
+                        packet_id,
+                    },
+                    b"published".to_vec(),
+                );
+                network::write_packet(&mut stream, publish_ack_packet)?;
+
                 println!("Published message to queue");
             }
             PacketType::Subscribe => {
@@ -203,6 +216,9 @@ impl Server {
             }
             PacketType::QueueFull => {
                 eprintln!("received QueueFull packet from client; ignoring");
+            }
+            PacketType::PublishAck => {
+                eprintln!("received PublishAck packet from client; ignoring");
             }
         }
 

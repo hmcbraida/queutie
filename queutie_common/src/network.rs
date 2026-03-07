@@ -7,6 +7,8 @@ use std::{
     str,
 };
 
+use rand::random;
+
 const FRAME_HEADER_LENGTH: usize = 4;
 const FRAME_BODY_LENGTH: usize = 1024;
 
@@ -81,16 +83,38 @@ pub enum PacketType {
     Publish,
     Subscribe,
     QueueFull,
+    PublishAck,
 }
 
 #[derive(Debug)]
 pub struct PacketHeader {
     pub packet_type: PacketType,
     pub packet_target: String,
+    pub packet_id: u64,
+}
+
+impl PacketHeader {
+    pub fn with_random_id(packet_type: PacketType, packet_target: impl Into<String>) -> Self {
+        Self {
+            packet_type,
+            packet_target: packet_target.into(),
+            packet_id: random::<u64>(),
+        }
+    }
+
+    pub fn with_zero_id(packet_type: PacketType, packet_target: impl Into<String>) -> Self {
+        Self {
+            packet_type,
+            packet_target: packet_target.into(),
+            packet_id: 0,
+        }
+    }
 }
 
 const PACKET_HEADER_SIZE: usize = 32;
 const PACKET_TARGET_SIZE: usize = 16;
+const PACKET_ID_OFFSET: usize = 1 + PACKET_TARGET_SIZE;
+const PACKET_ID_SIZE: usize = 8;
 
 #[derive(Debug)]
 pub struct Packet {
@@ -159,14 +183,21 @@ pub fn read_packet(stream: &mut TcpStream) -> Result<Packet, NetworkError> {
         0 => PacketType::Publish,
         1 => PacketType::Subscribe,
         2 => PacketType::QueueFull,
+        3 => PacketType::PublishAck,
         value => return Err(NetworkError::UnknownPacketType(value)),
     };
     let packet_target = str::from_utf8(&packet_data[1..1 + PACKET_TARGET_SIZE])
         .map_err(NetworkError::InvalidPacketTarget)?
         .to_string();
+    let packet_id = u64::from_be_bytes(
+        packet_data[PACKET_ID_OFFSET..PACKET_ID_OFFSET + PACKET_ID_SIZE]
+            .try_into()
+            .expect("packet id bytes should have fixed length"),
+    );
     let header = PacketHeader {
         packet_target,
         packet_type,
+        packet_id,
     };
 
     Ok(Packet { header, body })
@@ -179,11 +210,13 @@ pub fn write_packet(stream: &mut TcpStream, packet: Packet) -> Result<(), Networ
     let PacketHeader {
         packet_type,
         packet_target,
+        packet_id,
     } = header;
     packet_data[0] = match packet_type {
         PacketType::Publish => 0,
         PacketType::Subscribe => 1,
         PacketType::QueueFull => 2,
+        PacketType::PublishAck => 3,
     };
     let packet_target_bytes = packet_target.as_bytes();
     if packet_target_bytes.len() > PACKET_TARGET_SIZE {
@@ -193,6 +226,8 @@ pub fn write_packet(stream: &mut TcpStream, packet: Packet) -> Result<(), Networ
         });
     }
     packet_data[1..1 + packet_target_bytes.len()].copy_from_slice(packet_target_bytes);
+    packet_data[PACKET_ID_OFFSET..PACKET_ID_OFFSET + PACKET_ID_SIZE]
+        .copy_from_slice(&packet_id.to_be_bytes());
     packet_data.append(&mut body);
 
     let mut bytes_remaining = packet_data.len();
@@ -255,6 +290,7 @@ mod tests {
                 packet.header.packet_target.trim_end_matches('\0'),
                 "big_queue"
             );
+            assert_eq!(packet.header.packet_id, 77);
             assert_eq!(packet.body.len(), payload.len());
             assert_eq!(packet.body, payload);
         });
@@ -264,6 +300,7 @@ mod tests {
             PacketHeader {
                 packet_type: PacketType::Publish,
                 packet_target: String::from("big_queue"),
+                packet_id: 77,
             },
             vec![0xAB; 4097],
         );
@@ -286,6 +323,7 @@ mod tests {
             PacketHeader {
                 packet_type: PacketType::Publish,
                 packet_target: String::from("queue_name_that_is_too_long"),
+                packet_id: 5,
             },
             b"message".to_vec(),
         );
@@ -309,6 +347,7 @@ mod tests {
                 packet.header.packet_target.trim_end_matches('\0'),
                 "test_queue"
             );
+            assert_eq!(packet.header.packet_id, 1234);
             assert_eq!(packet.body, b"queue is full");
         });
 
@@ -317,8 +356,42 @@ mod tests {
             PacketHeader {
                 packet_type: PacketType::QueueFull,
                 packet_target: String::from("test_queue"),
+                packet_id: 1234,
             },
             b"queue is full".to_vec(),
+        );
+
+        write_packet(&mut client, packet).expect("packet should encode and send");
+
+        server_handle.join().unwrap();
+    }
+
+    #[test]
+    fn publish_ack_packet_roundtrips_packet_id() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let server_handle = thread::spawn(move || {
+            let (mut socket, _) = listener.accept().unwrap();
+            let packet = read_packet(&mut socket).expect("packet should decode");
+
+            assert!(matches!(packet.header.packet_type, PacketType::PublishAck));
+            assert_eq!(
+                packet.header.packet_target.trim_end_matches('\0'),
+                "test_queue"
+            );
+            assert_eq!(packet.header.packet_id, 9999);
+            assert_eq!(packet.body, b"accepted");
+        });
+
+        let mut client = TcpStream::connect(addr).unwrap();
+        let packet = Packet::new(
+            PacketHeader {
+                packet_type: PacketType::PublishAck,
+                packet_target: String::from("test_queue"),
+                packet_id: 9999,
+            },
+            b"accepted".to_vec(),
         );
 
         write_packet(&mut client, packet).expect("packet should encode and send");
