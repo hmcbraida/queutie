@@ -8,13 +8,14 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 
 use crate::queue::{Message, MessageQueue, Subscriber, TcpSubscriber};
-use queutie_common::network::{self, NetworkError, PacketType};
+use queutie_common::network::{self, NetworkError, PacketHeader, PacketType};
 
 type SharedQueue = Arc<Mutex<MessageQueue<TcpSubscriber>>>;
 pub type SharedState = Arc<Mutex<HashMap<String, SharedQueue>>>;
 
 pub struct Server {
     connection_pool_size: usize,
+    max_queue_messages: usize,
     state: SharedState,
     listener: TcpListener,
 }
@@ -61,7 +62,11 @@ impl From<NetworkError> for ServerError {
 }
 
 impl Server {
-    pub fn new(addr: &str, connection_pool_size: usize) -> io::Result<Self> {
+    pub fn new(
+        addr: &str,
+        connection_pool_size: usize,
+        max_queue_messages: usize,
+    ) -> io::Result<Self> {
         if connection_pool_size == 0 {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -73,6 +78,7 @@ impl Server {
         let state: SharedState = Arc::new(Mutex::new(HashMap::new()));
         Ok(Self {
             connection_pool_size,
+            max_queue_messages,
             state,
             listener,
         })
@@ -86,6 +92,7 @@ impl Server {
         let (sender, receiver) = mpsc::channel::<TcpStream>();
         let receiver = Arc::new(Mutex::new(receiver));
         let state = self.state;
+        let max_queue_messages = self.max_queue_messages;
 
         // Spawn a fixed set of workers so connection handling threads are bounded.
         // All workers share one `mpsc::Receiver<TcpStream>` via `Arc<Mutex<_>>`:
@@ -114,7 +121,9 @@ impl Server {
                         Err(_) => return,
                     };
 
-                    if let Err(error) = Self::handle_connection(stream, Arc::clone(&state)) {
+                    if let Err(error) =
+                        Self::handle_connection(stream, Arc::clone(&state), max_queue_messages)
+                    {
                         eprintln!("connection handler failed: {error}");
                     }
                 }
@@ -137,23 +146,43 @@ impl Server {
         }
     }
 
-    fn handle_connection(stream: TcpStream, state: SharedState) -> Result<(), ServerError> {
+    fn handle_connection(
+        stream: TcpStream,
+        state: SharedState,
+        max_queue_messages: usize,
+    ) -> Result<(), ServerError> {
         let mut stream = stream;
         let packet = network::read_packet(&mut stream)?;
 
-        let queue_name = packet
-            .header
-            .packet_target
-            .trim_end_matches('\0')
-            .to_string();
+        let network::Packet { header, body } = packet;
+        let PacketHeader {
+            packet_type,
+            packet_target,
+            packet_id,
+        } = header;
+        let queue_name = packet_target.trim_end_matches('\0').to_string();
 
-        match packet.header.packet_type {
+        match packet_type {
             PacketType::Publish => {
-                let message = Message::new(packet.body);
+                let message = Message::new(body);
                 let queue = Self::get_or_create_queue(&state, &queue_name)?;
 
                 let mut subscribers = {
                     let mut queue = queue.lock().map_err(|_| ServerError::QueuePoisoned)?;
+
+                    if queue.message_count() >= max_queue_messages {
+                        let queue_full_packet = network::Packet::new(
+                            PacketHeader {
+                                packet_type: PacketType::QueueFull,
+                                packet_target: queue_name.clone(),
+                                packet_id,
+                            },
+                            b"queue is full".to_vec(),
+                        );
+                        network::write_packet(&mut stream, queue_full_packet)?;
+                        return Ok(());
+                    }
+
                     queue.push_message(message.clone());
                     // Move subscribers out so network sends happen without holding
                     // the queue lock; surviving subscribers are restored afterward.
@@ -167,6 +196,16 @@ impl Server {
                 let mut queue = queue.lock().map_err(|_| ServerError::QueuePoisoned)?;
                 queue.restore_subscribers(subscribers);
 
+                let publish_ack_packet = network::Packet::new(
+                    PacketHeader {
+                        packet_type: PacketType::PublishAck,
+                        packet_target: queue_name,
+                        packet_id,
+                    },
+                    b"published".to_vec(),
+                );
+                network::write_packet(&mut stream, publish_ack_packet)?;
+
                 println!("Published message to queue");
             }
             PacketType::Subscribe => {
@@ -174,6 +213,12 @@ impl Server {
                 let mut queue = queue.lock().map_err(|_| ServerError::QueuePoisoned)?;
                 queue.add_subscriber(TcpSubscriber::new(stream));
                 println!("Subscriber added to queue");
+            }
+            PacketType::QueueFull => {
+                eprintln!("received QueueFull packet from client; ignoring");
+            }
+            PacketType::PublishAck => {
+                eprintln!("received PublishAck packet from client; ignoring");
             }
         }
 

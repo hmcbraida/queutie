@@ -5,10 +5,7 @@ use queutie_common::network::{self, PacketHeader, PacketType};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let packet = network::Packet::new(
-        PacketHeader {
-            packet_target: String::from("test_queue"),
-            packet_type: PacketType::Subscribe,
-        },
+        PacketHeader::with_zero_id(PacketType::Subscribe, "test_queue"),
         Vec::new(),
     );
 
