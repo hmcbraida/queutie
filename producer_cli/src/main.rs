@@ -21,14 +21,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         {
             println!(
                 "publish accepted for queue '{}' with packet_id {}",
-                response.header.packet_target.trim_end_matches('\0'),
-                response.header.packet_id
+                response.header.packet_target, response.header.packet_id
             );
         }
         Ok(response) if matches!(response.header.packet_type, PacketType::QueueFull) => {
             println!(
                 "publish rejected for queue '{}' (packet_id {}): {}",
-                response.header.packet_target.trim_end_matches('\0'),
+                response.header.packet_target,
                 response.header.packet_id,
                 String::from_utf8_lossy(&response.body)
             );

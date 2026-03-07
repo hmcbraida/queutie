@@ -160,7 +160,7 @@ impl Server {
             packet_target,
             packet_id,
         } = header;
-        let queue_name = packet_target.trim_end_matches('\0').to_string();
+        let queue_name = packet_target.to_string();
 
         match packet_type {
             PacketType::Publish => {

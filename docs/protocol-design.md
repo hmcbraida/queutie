@@ -42,13 +42,13 @@ Constants from implementation:
 
 Current layout of packet header bytes before framing:
 
-- Byte `0`: packet type (`0`/`1`)
+- Byte `0`: packet type (`0..=3`)
 - Bytes `1..16` region: queue target bytes (NUL padded by default)
 - Bytes `17..24`: packet id (`u64`, big-endian)
 - Remaining header bytes up to 32: reserved/zero-filled
 
-Note: read-side target extraction currently uses `packet_data[1..PACKET_TARGET_SIZE]`,
-then trims trailing `\0` at call sites.
+Read-side target extraction trims trailing `\0` during decode in
+`decode_packet_header`, so callers receive a normalized queue name.
 
 ## Frame model
 
@@ -75,7 +75,7 @@ Frame body:
 1. Build packet bytes (`32-byte` header + message body).
 2. Split bytes into chunks of up to `1024`.
 3. For each chunk, create a frame with final flag and length.
-4. Write frame header and body to stream, then flush.
+4. Write all frames, then flush once.
 
 Large payloads are supported by multi-frame segmentation.
 This is covered by a unit test for payload size `4097` bytes.
@@ -89,14 +89,16 @@ This is covered by a unit test for payload size `4097` bytes.
 3. Stop when final-frame flag is set.
 4. Split first 32 bytes as packet header and decode fields.
 
-Current error behavior is panic-heavy (`unwrap()` and `panic!`), not `Result` based.
+Decode/encode paths are `Result`-based and return `NetworkError` variants for
+malformed packets (invalid frame length, unknown packet type, short header,
+invalid UTF-8 target, oversized target).
 
 ## Server behavior
 
 Connection handling in `server/src/server.rs`:
 
 - Accept connection, decode one packet.
-- Determine queue name from packet target, trimming trailing NUL bytes.
+- Use decoded packet target directly as queue name.
 
 On `Publish`:
 
@@ -117,22 +119,22 @@ On `Subscribe`:
 - Thread-per-connection model may not scale under high concurrency.
 - No protocol version field or negotiation.
 - Queue target width is constrained by fixed header encoding.
-- Several production paths still rely on `unwrap()`.
 - Backpressure is drop-based only; there is no producer retry/ack semantics.
 
 ## Testing coverage (protocol-related)
 
 - `queutie_common/src/network.rs` unit test:
   - `write_packet_handles_payload_larger_than_frame_size`
+  - `write_packet_rejects_target_longer_than_protocol_limit`
+  - `packet_type_rejects_unknown_discriminant`
+  - `read_packet_rejects_payload_smaller_than_protocol_header`
 - `server/tests/integration_test.rs`:
   - publish/subscribe message delivery behavior
 - `server/tests/blocking_subscriber_test.rs`:
   - regression for publish behavior with slow subscribers
 
-## Suggested evolution path
+## TODO
 
-1. Move protocol read/write to `Result`-returning APIs.
-2. Define explicit packet header schema and document byte offsets.
-3. Introduce protocol versioning and compatibility checks.
-4. Add bounded queues/backpressure semantics.
-5. Consider async I/O or worker pool instead of thread-per-connection.
+1. Introduce protocol versioning and compatibility checks.
+2. Add bounded queues/backpressure semantics.
+3. Consider async I/O or worker pool instead of thread-per-connection.

@@ -98,10 +98,7 @@ fn test_publish_dropped_when_queue_is_full() {
 
     let response = network::read_packet(&mut publisher2).unwrap();
     assert!(matches!(response.header.packet_type, PacketType::QueueFull));
-    assert_eq!(
-        response.header.packet_target.trim_end_matches('\0'),
-        queue_name
-    );
+    assert_eq!(response.header.packet_target, queue_name);
     assert_eq!(response.header.packet_id, rejected_packet_id);
     assert_eq!(response.body, b"queue is full");
 
@@ -143,10 +140,7 @@ fn test_publish_ack_echoes_packet_id_for_accepted_message() {
         response.header.packet_type,
         PacketType::PublishAck
     ));
-    assert_eq!(
-        response.header.packet_target.trim_end_matches('\0'),
-        queue_name
-    );
+    assert_eq!(response.header.packet_target, queue_name);
     assert_eq!(response.header.packet_id, accepted_packet_id);
 
     let queue = {

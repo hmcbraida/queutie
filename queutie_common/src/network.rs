@@ -1,8 +1,13 @@
+//! Wire-format encode/decode helpers shared by server and clients.
+//!
+//! Protocol data is sent as fixed-size frames (`FRAME_HEADER_LENGTH` +
+//! `FRAME_BODY_LENGTH`) and reassembled into a logical [`Packet`].
+//! Packet headers are fixed width for predictable parsing.
+
 use std::{
     error::Error,
     fmt,
     io::{BufReader, BufWriter, Read, Write},
-    mem::size_of,
     net::TcpStream,
     str,
 };
@@ -11,25 +16,98 @@ use rand::random;
 
 const FRAME_HEADER_LENGTH: usize = 4;
 const FRAME_BODY_LENGTH: usize = 1024;
+const FRAME_FINAL_FLAG_OFFSET: usize = 0;
+const FRAME_BODY_LEN_OFFSET: usize = 1;
+const FRAME_BODY_LEN_LENGTH: usize = 2;
+const FINAL_FRAME_FLAG: u8 = 0x01;
+const NON_FINAL_FRAME_FLAG: u8 = 0x00;
 
+/// One on-the-wire frame containing framing metadata and up to 1024 payload bytes.
 #[derive(Debug)]
 struct PacketFrame {
-    // TODO: The header should be destructured in this struct, and the write /
-    // read frame operation should do the dirty work of deserialising. Right
-    // now it is done in read_frame and write_frame
     pub header: [u8; FRAME_HEADER_LENGTH],
     pub body: [u8; FRAME_BODY_LENGTH],
 }
 
 impl PacketFrame {
+    /// Returns an empty frame with all header/body bytes zeroed.
     pub fn blank() -> Self {
         PacketFrame {
             header: [0u8; FRAME_HEADER_LENGTH],
             body: [0u8; FRAME_BODY_LENGTH],
         }
     }
+
+    /// Reads exactly one full frame from the reader.
+    fn read_from(reader: &mut impl Read) -> Result<Self, NetworkError> {
+        let mut frame = Self::blank();
+        reader.read_exact(&mut frame.header)?;
+        reader.read_exact(&mut frame.body)?;
+
+        Ok(frame)
+    }
+
+    /// Writes exactly one full frame to the writer.
+    fn write_to(&self, writer: &mut impl Write) -> Result<(), NetworkError> {
+        writer.write_all(&self.header)?;
+        writer.write_all(&self.body)?;
+
+        Ok(())
+    }
+
+    /// Builds a frame from a packet-data chunk and final-frame marker.
+    fn from_chunk(chunk: &[u8], is_final: bool) -> Result<Self, NetworkError> {
+        if chunk.len() > FRAME_BODY_LENGTH {
+            return Err(NetworkError::InvalidFrameLength {
+                declared: chunk.len(),
+                max: FRAME_BODY_LENGTH,
+            });
+        }
+
+        let mut frame = Self::blank();
+        frame.header[FRAME_FINAL_FLAG_OFFSET] = if is_final {
+            FINAL_FRAME_FLAG
+        } else {
+            NON_FINAL_FRAME_FLAG
+        };
+
+        // Header stores payload length as a big-endian u16 in bytes 1..=2.
+        let chunk_len =
+            u16::try_from(chunk.len()).map_err(|_| NetworkError::InvalidFrameLength {
+                declared: chunk.len(),
+                max: FRAME_BODY_LENGTH,
+            })?;
+        frame.header[FRAME_BODY_LEN_OFFSET..FRAME_BODY_LEN_OFFSET + FRAME_BODY_LEN_LENGTH]
+            .copy_from_slice(&chunk_len.to_be_bytes());
+        frame.body[..chunk.len()].copy_from_slice(chunk);
+
+        Ok(frame)
+    }
+
+    /// Returns true when this frame is marked as the final frame in the packet.
+    fn is_final(&self) -> bool {
+        self.header[FRAME_FINAL_FLAG_OFFSET] == FINAL_FRAME_FLAG
+    }
+
+    /// Returns the declared body length from frame header bytes 1..=2.
+    fn body_length(&self) -> Result<usize, NetworkError> {
+        let body_length = u16::from_be_bytes([
+            self.header[FRAME_BODY_LEN_OFFSET],
+            self.header[FRAME_BODY_LEN_OFFSET + 1],
+        ]) as usize;
+
+        if body_length > FRAME_BODY_LENGTH {
+            return Err(NetworkError::InvalidFrameLength {
+                declared: body_length,
+                max: FRAME_BODY_LENGTH,
+            });
+        }
+
+        Ok(body_length)
+    }
 }
 
+/// Errors produced while reading/writing protocol packets.
 #[derive(Debug)]
 pub enum NetworkError {
     Io(std::io::Error),
@@ -78,7 +156,8 @@ impl From<std::io::Error> for NetworkError {
     }
 }
 
-#[derive(Debug)]
+/// Packet operation discriminator used in protocol headers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PacketType {
     Publish,
     Subscribe,
@@ -86,14 +165,44 @@ pub enum PacketType {
     PublishAck,
 }
 
+impl TryFrom<u8> for PacketType {
+    type Error = NetworkError;
+
+    fn try_from(value: u8) -> Result<Self, Self::Error> {
+        match value {
+            0 => Ok(Self::Publish),
+            1 => Ok(Self::Subscribe),
+            2 => Ok(Self::QueueFull),
+            3 => Ok(Self::PublishAck),
+            value => Err(NetworkError::UnknownPacketType(value)),
+        }
+    }
+}
+
+impl From<PacketType> for u8 {
+    fn from(value: PacketType) -> Self {
+        match value {
+            PacketType::Publish => 0,
+            PacketType::Subscribe => 1,
+            PacketType::QueueFull => 2,
+            PacketType::PublishAck => 3,
+        }
+    }
+}
+
+/// Header metadata for a logical packet.
 #[derive(Debug)]
 pub struct PacketHeader {
+    /// Operation represented by this packet.
     pub packet_type: PacketType,
+    /// Queue name target, encoded in a fixed-width protocol field.
     pub packet_target: String,
+    /// Correlation id carried round-trip across request/response packets.
     pub packet_id: u64,
 }
 
 impl PacketHeader {
+    /// Creates a header with a random `packet_id`.
     pub fn with_random_id(packet_type: PacketType, packet_target: impl Into<String>) -> Self {
         Self {
             packet_type,
@@ -102,6 +211,7 @@ impl PacketHeader {
         }
     }
 
+    /// Creates a header with `packet_id = 0`.
     pub fn with_zero_id(packet_type: PacketType, packet_target: impl Into<String>) -> Self {
         Self {
             packet_type,
@@ -112,58 +222,88 @@ impl PacketHeader {
 }
 
 const PACKET_HEADER_SIZE: usize = 32;
+const PACKET_TYPE_OFFSET: usize = 0;
+const PACKET_TARGET_OFFSET: usize = 1;
 const PACKET_TARGET_SIZE: usize = 16;
-const PACKET_ID_OFFSET: usize = 1 + PACKET_TARGET_SIZE;
+const PACKET_ID_OFFSET: usize = PACKET_TARGET_OFFSET + PACKET_TARGET_SIZE;
 const PACKET_ID_SIZE: usize = 8;
+const PACKET_TARGET_END: usize = PACKET_TARGET_OFFSET + PACKET_TARGET_SIZE;
+const PACKET_ID_END: usize = PACKET_ID_OFFSET + PACKET_ID_SIZE;
 
+/// A full decoded protocol packet.
 #[derive(Debug)]
 pub struct Packet {
+    /// Fixed-width protocol header fields.
     pub header: PacketHeader,
+    /// Opaque payload bytes.
     pub body: Vec<u8>,
 }
 
 impl Packet {
+    /// Constructs a packet from header and payload bytes.
     pub fn new(header: PacketHeader, body: Vec<u8>) -> Self {
         Packet { header, body }
     }
 }
 
-fn read_frame(buf_reader: &mut BufReader<&mut TcpStream>) -> Result<PacketFrame, NetworkError> {
-    let mut frame = PacketFrame::blank();
-    buf_reader.read_exact(&mut frame.header)?;
-    buf_reader.read_exact(&mut frame.body)?;
+/// Decodes a fixed-width packet header from raw bytes.
+fn decode_packet_header(header_data: &[u8]) -> Result<PacketHeader, NetworkError> {
+    if header_data.len() < PACKET_HEADER_SIZE {
+        return Err(NetworkError::MalformedPacket(
+            "packet payload is smaller than protocol header",
+        ));
+    }
 
-    Ok(frame)
+    let packet_type = PacketType::try_from(header_data[PACKET_TYPE_OFFSET])?;
+    let packet_target = str::from_utf8(&header_data[PACKET_TARGET_OFFSET..PACKET_TARGET_END])
+        .map_err(NetworkError::InvalidPacketTarget)?
+        // Target field is null-padded on write due to fixed-width encoding.
+        .trim_end_matches('\0')
+        .to_string();
+    let packet_id_bytes: [u8; PACKET_ID_SIZE] = header_data[PACKET_ID_OFFSET..PACKET_ID_END]
+        .try_into()
+        .map_err(|_| NetworkError::MalformedPacket("packet id field has invalid length"))?;
+    let packet_id = u64::from_be_bytes(packet_id_bytes);
+
+    Ok(PacketHeader {
+        packet_type,
+        packet_target,
+        packet_id,
+    })
 }
 
-fn write_frame(
-    buf_writer: &mut BufWriter<&mut TcpStream>,
-    frame: &PacketFrame,
-) -> Result<(), NetworkError> {
-    buf_writer.write_all(&frame.header)?;
-    buf_writer.write_all(&frame.body)?;
-    buf_writer.flush()?;
+/// Encodes a packet header into the fixed-width protocol representation.
+fn encode_packet_header(header: &PacketHeader) -> Result<[u8; PACKET_HEADER_SIZE], NetworkError> {
+    let mut header_data = [0u8; PACKET_HEADER_SIZE];
+    header_data[PACKET_TYPE_OFFSET] = u8::from(header.packet_type);
 
-    Ok(())
+    // No need to pad the packet_target with null bytes
+    // as we initialized the header_data to be blank above.
+    let packet_target_bytes = header.packet_target.as_bytes();
+    if packet_target_bytes.len() > PACKET_TARGET_SIZE {
+        return Err(NetworkError::PacketTargetTooLong {
+            max_len: PACKET_TARGET_SIZE,
+            actual_len: packet_target_bytes.len(),
+        });
+    }
+
+    header_data[PACKET_TARGET_OFFSET..PACKET_TARGET_OFFSET + packet_target_bytes.len()]
+        .copy_from_slice(packet_target_bytes);
+    header_data[PACKET_ID_OFFSET..PACKET_ID_END].copy_from_slice(&header.packet_id.to_be_bytes());
+
+    Ok(header_data)
 }
 
+/// Reads and decodes one logical packet from a TCP stream.
 pub fn read_packet(stream: &mut TcpStream) -> Result<Packet, NetworkError> {
     let mut packet_data: Vec<u8> = Vec::new();
 
     let mut buf_reader = BufReader::new(stream);
 
     loop {
-        let frame = read_frame(&mut buf_reader)?;
-
-        let frame_is_final = frame.header[0] == 0x01;
-        let frame_body_length = u16::from_be_bytes([frame.header[1], frame.header[2]]) as usize;
-
-        if frame_body_length > FRAME_BODY_LENGTH {
-            return Err(NetworkError::InvalidFrameLength {
-                declared: frame_body_length,
-                max: FRAME_BODY_LENGTH,
-            });
-        }
+        let frame = PacketFrame::read_from(&mut buf_reader)?;
+        let frame_is_final = frame.is_final();
+        let frame_body_length = frame.body_length()?;
 
         packet_data.extend_from_slice(&frame.body[..frame_body_length]);
 
@@ -172,106 +312,38 @@ pub fn read_packet(stream: &mut TcpStream) -> Result<Packet, NetworkError> {
         }
     }
 
-    if packet_data.len() < PACKET_HEADER_SIZE {
-        return Err(NetworkError::MalformedPacket(
-            "packet payload is smaller than protocol header",
-        ));
-    }
-
+    let header = decode_packet_header(&packet_data)?;
     let body = packet_data.split_off(PACKET_HEADER_SIZE);
-    let packet_type = match packet_data[0] {
-        0 => PacketType::Publish,
-        1 => PacketType::Subscribe,
-        2 => PacketType::QueueFull,
-        3 => PacketType::PublishAck,
-        value => return Err(NetworkError::UnknownPacketType(value)),
-    };
-    let packet_target = str::from_utf8(&packet_data[1..1 + PACKET_TARGET_SIZE])
-        .map_err(NetworkError::InvalidPacketTarget)?
-        .to_string();
-    let packet_id = u64::from_be_bytes(
-        packet_data[PACKET_ID_OFFSET..PACKET_ID_OFFSET + PACKET_ID_SIZE]
-            .try_into()
-            .expect("packet id bytes should have fixed length"),
-    );
-    let header = PacketHeader {
-        packet_target,
-        packet_type,
-        packet_id,
-    };
 
     Ok(Packet { header, body })
 }
 
+/// Encodes and writes one logical packet to a TCP stream.
 pub fn write_packet(stream: &mut TcpStream, packet: Packet) -> Result<(), NetworkError> {
     let Packet { header, mut body } = packet;
 
-    let mut packet_data = Vec::from([0u8; PACKET_HEADER_SIZE]);
-    let PacketHeader {
-        packet_type,
-        packet_target,
-        packet_id,
-    } = header;
-    packet_data[0] = match packet_type {
-        PacketType::Publish => 0,
-        PacketType::Subscribe => 1,
-        PacketType::QueueFull => 2,
-        PacketType::PublishAck => 3,
-    };
-    let packet_target_bytes = packet_target.as_bytes();
-    if packet_target_bytes.len() > PACKET_TARGET_SIZE {
-        return Err(NetworkError::PacketTargetTooLong {
-            max_len: PACKET_TARGET_SIZE,
-            actual_len: packet_target_bytes.len(),
-        });
-    }
-    packet_data[1..1 + packet_target_bytes.len()].copy_from_slice(packet_target_bytes);
-    packet_data[PACKET_ID_OFFSET..PACKET_ID_OFFSET + PACKET_ID_SIZE]
-        .copy_from_slice(&packet_id.to_be_bytes());
+    let mut packet_data = encode_packet_header(&header)?.to_vec();
     packet_data.append(&mut body);
-
-    let mut bytes_remaining = packet_data.len();
-    let mut read_offset: usize = 0;
 
     let mut buf_writer = BufWriter::new(stream);
 
-    while bytes_remaining > 0 {
-        let bytes_to_write: usize = if bytes_remaining > 1024 {
-            1024
-        } else {
-            bytes_remaining
-        };
-        bytes_remaining -= bytes_to_write;
-
-        // Construct a new packet frame
-        // First step is constructing the frame header.
-        let mut frame_header = [0u8; FRAME_HEADER_LENGTH];
-        // Byte zero of the frame is 1 if this the last frame, 0 else
-        frame_header[0] = if bytes_remaining == 0 { 0x01 } else { 0x00 };
-        // Bytes one to two represent the size of the packet in the frame.
-        frame_header[1..=2]
-            .copy_from_slice(&bytes_to_write.to_be_bytes()[size_of::<usize>() - 2..]);
-
-        // Next we construct the frame body by copying from the remaining packet.
-        let mut frame_body = [0u8; FRAME_BODY_LENGTH];
-        frame_body[..bytes_to_write]
-            .copy_from_slice(&packet_data[read_offset..read_offset + bytes_to_write]);
-        read_offset += bytes_to_write;
-
-        let frame = PacketFrame {
-            header: frame_header,
-            body: frame_body,
-        };
-
-        write_frame(&mut buf_writer, &frame)?;
+    let mut packet_chunks = packet_data.chunks(FRAME_BODY_LENGTH).peekable();
+    while let Some(chunk) = packet_chunks.next() {
+        let is_final = packet_chunks.peek().is_none();
+        let frame = PacketFrame::from_chunk(chunk, is_final)?;
+        frame.write_to(&mut buf_writer)?;
     }
+
+    buf_writer.flush()?;
 
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{NetworkError, Packet, PacketHeader, PacketType, read_packet, write_packet};
+    use super::{
+        NetworkError, Packet, PacketFrame, PacketHeader, PacketType, read_packet, write_packet,
+    };
     use std::net::{TcpListener, TcpStream};
     use std::thread;
 
@@ -286,10 +358,7 @@ mod tests {
             let packet = read_packet(&mut socket).expect("packet should decode");
 
             assert!(matches!(packet.header.packet_type, PacketType::Publish));
-            assert_eq!(
-                packet.header.packet_target.trim_end_matches('\0'),
-                "big_queue"
-            );
+            assert_eq!(packet.header.packet_target, "big_queue");
             assert_eq!(packet.header.packet_id, 77);
             assert_eq!(packet.body.len(), payload.len());
             assert_eq!(packet.body, payload);
@@ -334,6 +403,35 @@ mod tests {
     }
 
     #[test]
+    fn packet_type_rejects_unknown_discriminant() {
+        let error = PacketType::try_from(99).unwrap_err();
+
+        assert!(matches!(error, NetworkError::UnknownPacketType(99)));
+    }
+
+    #[test]
+    fn read_packet_rejects_payload_smaller_than_protocol_header() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let server_handle = thread::spawn(move || {
+            let (mut socket, _) = listener.accept().unwrap();
+            let error = read_packet(&mut socket).unwrap_err();
+
+            assert!(matches!(
+                error,
+                NetworkError::MalformedPacket("packet payload is smaller than protocol header")
+            ));
+        });
+
+        let mut client = TcpStream::connect(addr).unwrap();
+        let frame = PacketFrame::from_chunk(&[0xAA; 8], true).expect("frame should encode");
+        frame.write_to(&mut client).expect("frame should send");
+
+        server_handle.join().unwrap();
+    }
+
+    #[test]
     fn queue_full_packet_roundtrips() {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
@@ -343,10 +441,7 @@ mod tests {
             let packet = read_packet(&mut socket).expect("packet should decode");
 
             assert!(matches!(packet.header.packet_type, PacketType::QueueFull));
-            assert_eq!(
-                packet.header.packet_target.trim_end_matches('\0'),
-                "test_queue"
-            );
+            assert_eq!(packet.header.packet_target, "test_queue");
             assert_eq!(packet.header.packet_id, 1234);
             assert_eq!(packet.body, b"queue is full");
         });
@@ -376,10 +471,7 @@ mod tests {
             let packet = read_packet(&mut socket).expect("packet should decode");
 
             assert!(matches!(packet.header.packet_type, PacketType::PublishAck));
-            assert_eq!(
-                packet.header.packet_target.trim_end_matches('\0'),
-                "test_queue"
-            );
+            assert_eq!(packet.header.packet_target, "test_queue");
             assert_eq!(packet.header.packet_id, 9999);
             assert_eq!(packet.body, b"accepted");
         });
